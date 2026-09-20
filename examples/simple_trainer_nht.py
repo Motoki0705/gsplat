@@ -76,6 +76,8 @@ class Config:
     # If False and that folder contains JPEGs, full-res images/ are resized into
     # images_{data_factor}_png (original gsplat behavior).
     native_images_factor: bool = False
+    # Optional supervision subset; normalization still uses the entire SfM model.
+    image_names: Optional[List[str]] = None
     # Directory to save results
     result_dir: str = "results/garden"
     # Every N images there is a test image
@@ -411,6 +413,7 @@ class Runner:
             test_every=cfg.test_every,
             load_exposure=cfg.load_exposure,
             native_images_factor=cfg.native_images_factor,
+            image_names=cfg.image_names,
         )
         self.trainset = Dataset(
             self.parser,

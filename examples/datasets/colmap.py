@@ -181,7 +181,9 @@ class Parser:
         test_every: int = 8,
         load_exposure: bool = False,
         native_images_factor: bool = False,
+        image_names: Optional[List[str]] = None,
     ):
+        requested_image_names = image_names
         self.data_dir = data_dir
         self.factor = factor
         self.normalize = normalize
@@ -279,6 +281,32 @@ class Parser:
         camtoworlds = camtoworlds[inds]
         camera_ids = [camera_ids[i] for i in inds]
 
+        # Keep complete camera arrays for normalization and scene scale. Only RGB
+        # resolution and supervision use this explicit subset of original indices.
+        self.full_image_count = len(image_names)
+        if requested_image_names is None:
+            source_indices = np.arange(len(image_names))
+        else:
+            if not requested_image_names or len(set(requested_image_names)) != len(
+                requested_image_names
+            ):
+                raise ValueError("image_names must be a nonempty list without duplicates")
+            missing = set(requested_image_names) - set(image_names)
+            if missing:
+                raise ValueError(
+                    f"Selected images are not registered by SfM: {sorted(missing)}"
+                )
+            requested = set(requested_image_names)
+            source_indices = np.array(
+                [i for i, name in enumerate(image_names) if name in requested]
+            )
+            validation = source_indices % test_every == 0
+            if not validation.any() or validation.all():
+                raise ValueError(
+                    "Selected images must retain nonempty original train and validation splits"
+                )
+        selected_names = [image_names[i] for i in source_indices]
+
         # Load extended metadata. Used by Bilarf dataset.
         self.extconf = {
             "spiral_radius_scale": 1.0,
@@ -323,7 +351,7 @@ class Parser:
         factor_groups = _build_stem_parent_groups(image_files)
         image_paths = [
             os.path.join(image_dir, _resolve_factor_image_relpath(n, factor_groups, image_dir))
-            for n in image_names
+            for n in selected_names
         ]
 
         # 3D points and {image_name -> [point_idx]}
@@ -373,10 +401,11 @@ class Parser:
         else:
             transform = np.eye(4)
 
-        self.image_names = image_names  # List[str], (num_images,)
+        self.image_names = selected_names  # List[str], (num_images,)
         self.image_paths = image_paths  # List[str], (num_images,)
-        self.camtoworlds = camtoworlds  # np.ndarray, (num_images, 4, 4)
-        self.camera_ids = camera_ids  # List[int], (num_images,)
+        self.camtoworlds = camtoworlds[source_indices]  # (num_selected, 4, 4)
+        self.camera_ids = [camera_ids[i] for i in source_indices]
+        self.source_indices = source_indices
         self.Ks_dict = Ks_dict  # Dict of camera_id -> K
         self.params_dict = params_dict  # Dict of camera_id -> params
         self.imsize_dict = imsize_dict  # Dict of camera_id -> (width, height)
@@ -391,14 +420,14 @@ class Parser:
         # This is useful for camera-based embeddings/modules.
         unique_camera_ids = sorted(set(camera_ids))
         self.camera_id_to_idx = {cid: idx for idx, cid in enumerate(unique_camera_ids)}
-        self.camera_indices = [self.camera_id_to_idx[cid] for cid in camera_ids]
+        self.camera_indices = [self.camera_id_to_idx[cid] for cid in self.camera_ids]
         self.num_cameras = len(unique_camera_ids)
 
         # Load EXIF exposure data if requested.
         # Always read from original (non-downscaled) images since PNG doesn't support EXIF.
         if load_exposure:
             exposure_values: List[Optional[float]] = []
-            for image_name in tqdm(image_names, desc="Loading EXIF exposure"):
+            for image_name in tqdm(self.image_names, desc="Loading EXIF exposure"):
                 original_path = Path(colmap_image_dir) / image_name
                 exposure_values.append(compute_exposure_from_exif(original_path))
 
@@ -525,9 +554,9 @@ class Dataset:
         self.load_depths = load_depths
         indices = np.arange(len(self.parser.image_names))
         if split == "train":
-            self.indices = indices[indices % self.parser.test_every != 0]
+            self.indices = indices[self.parser.source_indices % self.parser.test_every != 0]
         else:
-            self.indices = indices[indices % self.parser.test_every == 0]
+            self.indices = indices[self.parser.source_indices % self.parser.test_every == 0]
 
     def __len__(self):
         return len(self.indices)
